@@ -1,0 +1,49 @@
+{
+  "name": "pi-gh-bot-extension",
+  "version": "0.1.0",
+  "description": "Run GitHub CLI commands from Pi through a separate bot identity.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Adi",
+  "homepage": "https://github.com/adstastic/pi-gh-bot-extension#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adstastic/pi-gh-bot-extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adstastic/pi-gh-bot-extension/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "github",
+    "github-cli",
+    "gh",
+    "bot"
+  ],
+  "files": [
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "src",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

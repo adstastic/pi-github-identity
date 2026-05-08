@@ -233,9 +233,22 @@ npm run pack:dry-run
 
 ## Publish checklist
 
+This repo publishes with npm Trusted Publishing, not an `NPM_TOKEN` secret.
+
+In npm package settings, configure GitHub Actions trusted publisher:
+
+- owner: `adstastic`
+- repo: `pi-github-identity`
+- workflow file: `npm-publish.yml`
+- environment: `npm`
+
+Then tag a release:
+
 ```bash
-npm login
-npm publish --access public
+git tag v0.1.0
+git push origin v0.1.0
 ```
+
+Workflow `.github/workflows/npm-publish.yml` runs `npm ci`, `npm run check`, then `npm publish --access public --provenance`.
 
 Pi package discovery uses the `pi-package` keyword and `pi.extensions` manifest in `package.json`.

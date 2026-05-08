@@ -2,7 +2,8 @@
 
 ## 0.1.0
 
-- Add Pi extension that isolates GitHub CLI auth through bot `GH_CONFIG_DIR`.
+- Add explicit `gh_bot` tool for GitHub issue/PR comments, review replies, and other visible GitHub actions that should come from the bot account.
+- Keep normal Pi shell `gh`/`git` behavior as the user's existing identity; bot auth is used only by `gh_bot` and auth/status commands.
 - Add `/gh-bot-status` command.
 - Add `/gh-bot-auth` browser OAuth flow with visible device code and bot-account warning.
 - Add `PI_GH_BOT_EXPECTED_LOGIN` fail-closed account enforcement.

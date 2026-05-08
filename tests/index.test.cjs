@@ -27,14 +27,20 @@ function restoreEnvAfter(fn) {
 			await fn();
 		} finally {
 			for (const [key, value] of snapshot) {
-				if (value === undefined) {
-					delete process.env[key];
-				} else {
-					process.env[key] = value;
-				}
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
 			}
 		}
 	};
+}
+
+function addFakeGh(script) {
+	const binDir = mkdtempSync(join(tmpdir(), "gh-bot-bin-"));
+	const fakeGh = join(binDir, "gh");
+	writeFileSync(fakeGh, script);
+	chmodSync(fakeGh, 0o755);
+	process.env.PATH = `${binDir}:${process.env.PATH}`;
+	return binDir;
 }
 
 test(
@@ -70,6 +76,9 @@ test(
 		assert.equal(authEnv.GH_CONFIG_DIR, "/tmp/gh-bot");
 		assert.equal(authEnv.GH_TOKEN, undefined);
 		assert.equal(authEnv.GH_PROMPT_DISABLED, undefined);
+
+		const botEnv = extension.getBotEnvironment("/tmp/gh-bot");
+		assert.equal(botEnv.GH_PROMPT_DISABLED, "1");
 	}),
 );
 
@@ -87,29 +96,25 @@ test(
 );
 
 test(
-	"expected login mismatch fails closed and quarantines GH_CONFIG_DIR",
+	"expected login mismatch fails closed without mutating process gh env",
 	restoreEnvAfter(async () => {
 		const configDir = mkdtempSync(join(tmpdir(), "gh-bot-config-"));
+		const binDir = addFakeGh("#!/usr/bin/env bash\nprintf 'personal-user\\n'\n");
 		try {
 			process.env.PI_GH_BOT_CONFIG_DIR = configDir;
 			process.env.PI_GH_BOT_EXPECTED_LOGIN = "bot-user";
+			process.env.GH_CONFIG_DIR = "/tmp/user-gh";
 
-			const status = await extension.readActiveLogin(
-				{
-					async exec() {
-						return { stdout: "personal-user\n", stderr: "", code: 0, killed: false };
-					},
-				},
-				process.cwd(),
-			);
+			const status = await extension.readActiveLogin(process.cwd());
 
 			assert.equal(status.login, undefined);
 			assert.equal(status.actualLogin, "personal-user");
 			assert.equal(status.expectedLogin, "bot-user");
-			assert.equal(extension.statusText(status), "gh:wrong-account");
+			assert.equal(extension.statusText(status), "gh: wrong-account");
 			assert.match(status.error, /Refusing to use this GitHub identity/);
-			assert.equal(process.env.GH_CONFIG_DIR, resolve(configDir, ".blocked-unexpected-login"));
+			assert.equal(process.env.GH_CONFIG_DIR, "/tmp/user-gh");
 		} finally {
+			rmSync(binDir, { recursive: true, force: true });
 			rmSync(configDir, { recursive: true, force: true });
 		}
 	}),
@@ -118,35 +123,27 @@ test(
 test(
 	"auth failure clears auth widget",
 	restoreEnvAfter(async () => {
-		const binDir = mkdtempSync(join(tmpdir(), "gh-bot-bin-"));
 		const configDir = mkdtempSync(join(tmpdir(), "gh-bot-config-"));
+		const binDir = addFakeGh(
+			[
+				"#!/usr/bin/env bash",
+				"printf '! One-time code (BF77-9647) copied to clipboard\\n' >&2",
+				"printf 'Open this URL to continue in your web browser: https://github.com/login/device\\n' >&2",
+				"read -r _ || true",
+				"exit 1",
+				"",
+			].join("\n"),
+		);
 		try {
-			const fakeGh = join(binDir, "gh");
-			writeFileSync(
-				fakeGh,
-				[
-					"#!/usr/bin/env bash",
-					"printf '! One-time code (BF77-9647) copied to clipboard\\n' >&2",
-					"printf 'Open this URL to continue in your web browser: https://github.com/login/device\\n' >&2",
-					"read -r _ || true",
-					"exit 1",
-					"",
-				].join("\n"),
-			);
-			chmodSync(fakeGh, 0o755);
-
-			process.env.PATH = `${binDir}:${process.env.PATH}`;
 			process.env.PI_GH_BOT_CONFIG_DIR = configDir;
 			delete process.env.PI_GH_BOT_EXPECTED_LOGIN;
 
 			const commands = {};
 			extension.default({
 				on() {},
+				registerTool() {},
 				registerCommand(name, command) {
 					commands[name] = command;
-				},
-				async exec() {
-					return { stdout: "", stderr: "not logged in", code: 1, killed: false };
 				},
 			});
 
@@ -176,6 +173,51 @@ test(
 		} finally {
 			rmSync(binDir, { recursive: true, force: true });
 			rmSync(configDir, { recursive: true, force: true });
+		}
+	}),
+);
+
+test(
+	"gh_bot tool runs gh with bot config but does not mutate process gh env",
+	restoreEnvAfter(async () => {
+		const configDir = mkdtempSync(join(tmpdir(), "gh-bot-config-"));
+		const logFile = join(tmpdir(), `gh-bot-env-${Date.now()}.log`);
+		const binDir = addFakeGh(
+			[
+				"#!/usr/bin/env bash",
+				`printf '%s\\n' \"$GH_CONFIG_DIR|$GH_TOKEN|$GH_PROMPT_DISABLED|$*\" >> ${JSON.stringify(logFile)}`,
+				"if [ \"$1 $2 $3 $4\" = 'api user --jq .login' ]; then printf 'bot-user\\n'; exit 0; fi",
+				"printf 'ran:%s\\n' \"$*\"",
+				"",
+			].join("\n"),
+		);
+		try {
+			process.env.PI_GH_BOT_CONFIG_DIR = configDir;
+			process.env.PI_GH_BOT_EXPECTED_LOGIN = "bot-user";
+			process.env.GH_CONFIG_DIR = "/tmp/user-gh";
+			process.env.GH_TOKEN = "user-token";
+
+			let tool;
+			extension.default({
+				on() {},
+				registerCommand() {},
+				registerTool(definition) {
+					if (definition.name === "gh_bot") tool = definition;
+				},
+			});
+
+			const result = await tool.execute("tool-1", { args: ["issue", "comment", "1", "--body", "hello"] }, undefined, undefined, {
+				cwd: process.cwd(),
+			});
+
+			assert.match(result.content[0].text, /gh_bot as bot-user/);
+			assert.match(result.content[0].text, /ran:issue comment 1 --body hello/);
+			assert.equal(process.env.GH_CONFIG_DIR, "/tmp/user-gh");
+			assert.equal(process.env.GH_TOKEN, "user-token");
+		} finally {
+			rmSync(binDir, { recursive: true, force: true });
+			rmSync(configDir, { recursive: true, force: true });
+			rmSync(logFile, { force: true });
 		}
 	}),
 );

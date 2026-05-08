@@ -1,31 +1,58 @@
 # Pi GitHub Bot Extension
 
-Run GitHub CLI commands from Pi through a separate bot identity while leaving your normal terminal `gh` login untouched.
+Run selected GitHub CLI actions from Pi through a separate bot identity, without taking over your normal `gh` or Git workflow.
+
+## Philosophy
+
+This package is for visible GitHub actions where attribution matters: issue comments, PR comments, review replies, bot-to-human dialogue, and future async workflows.
+
+By default it does **not** force all Pi shell commands to use the bot. Your normal `bash`/`gh`/`git` usage can stay as you. The extension adds an explicit `gh_bot` tool that the agent should use when a GitHub action should appear from the bot account.
 
 ## What it does
 
-On load, the extension:
-
-- Sets `GH_CONFIG_DIR` to `~/.config/gh-bot` by default.
-- Supports `PI_GH_BOT_CONFIG_DIR=/path/to/config` override.
-- Supports `PI_GH_BOT_EXPECTED_LOGIN=bot-login` fail-closed identity enforcement.
-- Sets `GH_PROMPT_DISABLED=1` for non-auth `gh` calls.
-- Removes token env vars that would bypass `GH_CONFIG_DIR`:
+- Keeps bot GitHub CLI auth in a separate config dir:
+  - default: `~/.config/gh-bot`
+  - override: `PI_GH_BOT_CONFIG_DIR=/path/to/config`
+- Adds `gh_bot` tool for running `gh` with bot `GH_CONFIG_DIR`.
+- Removes token env vars from `gh_bot` calls so `GH_CONFIG_DIR` auth wins:
   - `GH_TOKEN`
   - `GITHUB_TOKEN`
   - `GH_ENTERPRISE_TOKEN`
   - `GITHUB_ENTERPRISE_TOKEN`
-- Checks the active bot account with `gh api user --jq .login`.
-- Shows Pi footer status:
-  - `gh:<login>` when authenticated as the accepted account
-  - `gh:auth-missing` when auth is missing
-  - `gh:wrong-account` when authenticated account does not match `PI_GH_BOT_EXPECTED_LOGIN`
+- Supports `PI_GH_BOT_EXPECTED_LOGIN=bot-login` fail-closed identity enforcement.
+- Shows Pi footer status for the bot account:
+  - `gh: <login>` when bot auth is ready
+  - `gh: auth-missing` when bot auth is missing
+  - `gh: wrong-account` when authenticated account does not match `PI_GH_BOT_EXPECTED_LOGIN`
+
+## Tool
+
+### `gh_bot`
+
+Runs GitHub CLI as the bot identity. Args are `gh` args without the leading `gh`.
+
+Use cases:
+
+- Create issue comments as bot.
+- Reply to PR review comments as bot.
+- Leave PR review comments as bot.
+- Run visible GitHub actions where attribution should be bot, not you.
+
+Examples of underlying commands the tool can run:
+
+```bash
+gh issue comment 123 --body "..."
+gh pr comment 456 --body "..."
+gh api repos/OWNER/REPO/pulls/PR/comments -f body="..." ...
+```
+
+Normal shell `gh` remains your existing identity unless you choose otherwise.
 
 ## Commands
 
 ### `/gh-bot-status`
 
-Shows active GitHub login and `GH_CONFIG_DIR`. If auth is missing, offers to start browser auth.
+Shows bot GitHub login and `GH_CONFIG_DIR`. If bot auth is missing, offers to start browser auth.
 
 ### `/gh-bot-auth`
 
@@ -80,24 +107,19 @@ Authenticate bot:
 /gh-bot-auth
 ```
 
-Check status:
+Check bot status:
 
 ```text
 /gh-bot-status
 ```
 
-Verify `gh` inside Pi uses bot:
+Ask Pi to comment as bot, for example:
 
-```bash
-gh api user --jq .login
+```text
+Reply to PR comment 123456 as the bot: "Fixed in latest patch."
 ```
 
-Verify normal terminal still uses your account:
-
-```bash
-unset GH_CONFIG_DIR
-gh api user --jq .login
-```
+The tool guidance tells Pi to use `gh_bot` for visible GitHub comments/replies.
 
 ## Configuration
 
@@ -113,7 +135,7 @@ Expected bot login:
 PI_GH_BOT_EXPECTED_LOGIN=my-bot pi
 ```
 
-When `PI_GH_BOT_EXPECTED_LOGIN` is set, the extension refuses mismatched browser auth. It reports `gh:wrong-account` and points `GH_CONFIG_DIR` at a blocked empty config dir so Pi child `gh` commands cannot continue as the wrong account.
+When `PI_GH_BOT_EXPECTED_LOGIN` is set, `gh_bot` refuses mismatched browser auth and reports `gh: wrong-account`.
 
 ## Manual auth equivalent
 
@@ -140,10 +162,11 @@ env \
 ## Safety notes
 
 - Normal terminal `gh` config is unchanged.
-- Pi process and Pi child tool calls inherit bot `GH_CONFIG_DIR`.
-- Bot auth missing becomes explicit `gh:auth-missing`; extension does not silently fall back to user `gh` config.
-- Expected login mismatch becomes explicit `gh:wrong-account` and is blocked closed.
-- Commands that explicitly set `GH_TOKEN=... gh ...` can still override this. Future guard can block or rewrite those commands.
+- Normal Pi shell `gh` and `git` remain your existing identity.
+- Only the `gh_bot` tool uses bot `GH_CONFIG_DIR`.
+- Bot auth missing becomes explicit `gh: auth-missing`.
+- Expected login mismatch becomes explicit `gh: wrong-account` and fails closed.
+- Repository access still depends on the bot account permissions. If the bot is not a collaborator/member, it cannot comment in private repos.
 
 ## Development
 

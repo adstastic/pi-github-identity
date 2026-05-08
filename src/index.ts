@@ -1,8 +1,9 @@
-import type { ExecResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { Type } from "typebox";
 
 const STATUS_KEY = "gh-bot";
 const AUTH_WIDGET_KEY = "gh-bot-auth";
@@ -10,25 +11,24 @@ const DEFAULT_CONFIG_DIR = "~/.config/gh-bot";
 const EXPECTED_LOGIN_ENV_KEY = "PI_GH_BOT_EXPECTED_LOGIN";
 const AUTH_HOSTNAME = "github.com";
 const AUTH_TIMEOUT_MS = 10 * 60 * 1000;
-const AUTH_KILL_GRACE_MS = 5_000;
-const MAX_AUTH_OUTPUT_CHARS = 8_000;
+const COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
+const KILL_GRACE_MS = 5_000;
+const MAX_OUTPUT_CHARS = 12_000;
 const TOKEN_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] as const;
 
-type GitHubBotEnvironment = {
+type GitHubBotStatus = {
 	configDir: string;
 	expectedLogin?: string;
-};
-
-type GitHubBotStatus = GitHubBotEnvironment & {
 	login?: string;
 	actualLogin?: string;
 	error?: string;
 };
 
-type AuthResult = {
+type ProcessResult = {
+	stdout: string;
+	stderr: string;
 	code: number | null;
 	signal: NodeJS.Signals | null;
-	output: string;
 	timedOut: boolean;
 };
 
@@ -39,14 +39,8 @@ type AuthDisplayState = {
 };
 
 export function expandHome(path: string): string {
-	if (path === "~") {
-		return homedir();
-	}
-
-	if (path.startsWith("~/")) {
-		return resolve(homedir(), path.slice(2));
-	}
-
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
 	return path;
 }
 
@@ -60,109 +54,155 @@ function getExpectedLogin(): string | undefined {
 }
 
 export function removeTokenEnvironment(env: NodeJS.ProcessEnv): void {
-	for (const key of TOKEN_ENV_KEYS) {
-		delete env[key];
-	}
+	for (const key of TOKEN_ENV_KEYS) delete env[key];
 }
 
-function applyGitHubBotEnvironment(): GitHubBotEnvironment {
-	const configDir = getConfiguredBotDir();
-	const expectedLogin = getExpectedLogin();
-
-	process.env.GH_CONFIG_DIR = configDir;
-	process.env.GH_PROMPT_DISABLED = "1";
-	removeTokenEnvironment(process.env);
-
-	return { configDir, expectedLogin };
-}
-
-function quarantineGitHubConfigDir(configDir: string): void {
-	process.env.GH_CONFIG_DIR = resolve(configDir, ".blocked-unexpected-login");
-	process.env.GH_PROMPT_DISABLED = "1";
-	removeTokenEnvironment(process.env);
-}
-
-export function getAuthEnvironment(configDir: string): NodeJS.ProcessEnv {
+export function getBotEnvironment(configDir = getConfiguredBotDir(), promptDisabled = true): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env, GH_CONFIG_DIR: configDir };
 	removeTokenEnvironment(env);
-	delete env.GH_PROMPT_DISABLED;
+	if (promptDisabled) env.GH_PROMPT_DISABLED = "1";
+	else delete env.GH_PROMPT_DISABLED;
 	return env;
 }
 
-function summarizeGhFailure(result: ExecResult): string {
-	const stderr = result.stderr.trim();
-	if (stderr) {
-		return stderr;
-	}
+export function getAuthEnvironment(configDir: string): NodeJS.ProcessEnv {
+	return getBotEnvironment(configDir, false);
+}
 
-	const stdout = result.stdout.trim();
-	if (stdout) {
-		return stdout;
-	}
+function stripAnsi(text: string): string {
+	return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
 
-	return `gh exited with code ${result.code}`;
+function appendLimited(existing: string, next: string): string {
+	const combined = existing + next;
+	return combined.length > MAX_OUTPUT_CHARS ? combined.slice(-MAX_OUTPUT_CHARS) : combined;
+}
+
+export function extractDeviceCode(text: string): string | undefined {
+	return text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
+}
+
+export function extractDeviceUrl(text: string): string | undefined {
+	return text.match(/https:\/\/github\.com\/login\/device\S*/)?.[0];
 }
 
 function loginMatchesExpected(actualLogin: string, expectedLogin: string): boolean {
 	return actualLogin.toLowerCase() === expectedLogin.toLowerCase();
 }
 
-export async function readActiveLogin(pi: ExtensionAPI, cwd: string): Promise<GitHubBotStatus> {
-	const env = applyGitHubBotEnvironment();
+function summarizeFailure(result: ProcessResult): string {
+	const stderr = result.stderr.trim();
+	if (stderr) return stderr;
+	const stdout = result.stdout.trim();
+	if (stdout) return stdout;
+	if (result.timedOut) return "timed out";
+	return `exit ${result.code ?? "unknown"}${result.signal ? ` (${result.signal})` : ""}`;
+}
 
-	let result: ExecResult;
+function runProcess(options: {
+	command: string;
+	args: string[];
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+	timeoutMs: number;
+	input?: string;
+	onOutput?: (chunk: string) => void;
+}): Promise<ProcessResult> {
+	return new Promise<ProcessResult>((resolveResult, rejectResult) => {
+		const child = spawn(options.command, options.args, {
+			cwd: options.cwd,
+			env: options.env,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+
+		let stdout = "";
+		let stderr = "";
+		let timedOut = false;
+		let killTimeout: NodeJS.Timeout | undefined;
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			child.kill("SIGTERM");
+			killTimeout = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+		}, options.timeoutMs);
+
+		child.once("error", (error) => {
+			clearTimeout(timeout);
+			if (killTimeout) clearTimeout(killTimeout);
+			rejectResult(error);
+		});
+
+		child.stdout?.on("data", (chunk: Buffer) => {
+			const text = chunk.toString("utf8");
+			stdout = appendLimited(stdout, text);
+			options.onOutput?.(text);
+		});
+
+		child.stderr?.on("data", (chunk: Buffer) => {
+			const text = chunk.toString("utf8");
+			stderr = appendLimited(stderr, text);
+			options.onOutput?.(text);
+		});
+
+		child.once("close", (code, signal) => {
+			clearTimeout(timeout);
+			if (killTimeout) clearTimeout(killTimeout);
+			resolveResult({ stdout: stripAnsi(stdout).trimEnd(), stderr: stripAnsi(stderr).trimEnd(), code, signal, timedOut });
+		});
+
+		if (options.input !== undefined) child.stdin?.write(options.input);
+		child.stdin?.end();
+	});
+}
+
+async function runGhBot(args: string[], cwd: string, promptDisabled = true, timeoutMs = COMMAND_TIMEOUT_MS): Promise<ProcessResult> {
+	return runProcess({
+		command: "gh",
+		args,
+		cwd,
+		env: getBotEnvironment(getConfiguredBotDir(), promptDisabled),
+		timeoutMs,
+	});
+}
+
+export async function readActiveLogin(cwd: string): Promise<GitHubBotStatus> {
+	const configDir = getConfiguredBotDir();
+	const expectedLogin = getExpectedLogin();
+
+	let result: ProcessResult;
 	try {
-		result = await pi.exec("gh", ["api", "user", "--jq", ".login"], { cwd, timeout: 10_000 });
+		result = await runGhBot(["api", "user", "--jq", ".login"], cwd);
 	} catch (error) {
-		return {
-			...env,
-			error: error instanceof Error ? error.message : String(error),
-		};
+		return { configDir, expectedLogin, error: error instanceof Error ? error.message : String(error) };
 	}
 
 	const actualLogin = result.stdout.trim();
 	if (result.code === 0 && actualLogin) {
-		if (env.expectedLogin && !loginMatchesExpected(actualLogin, env.expectedLogin)) {
-			quarantineGitHubConfigDir(env.configDir);
+		if (expectedLogin && !loginMatchesExpected(actualLogin, expectedLogin)) {
 			return {
-				...env,
+				configDir,
+				expectedLogin,
 				actualLogin,
-				error: `Authenticated as ${actualLogin}, expected ${env.expectedLogin}. Refusing to use this GitHub identity.`,
+				error: `Authenticated as ${actualLogin}, expected ${expectedLogin}. Refusing to use this GitHub identity.`,
 			};
 		}
 
-		return { ...env, login: actualLogin, actualLogin };
+		return { configDir, expectedLogin, login: actualLogin, actualLogin };
 	}
 
-	return {
-		...env,
-		error: summarizeGhFailure(result),
-	};
+	return { configDir, expectedLogin, error: summarizeFailure(result) };
 }
 
 export function statusText(status: GitHubBotStatus): string {
-	if (status.login) {
-		return `gh:${status.login}`;
-	}
-
-	if (status.actualLogin && status.expectedLogin) {
-		return "gh:wrong-account";
-	}
-
-	return "gh:auth-missing";
+	if (status.login) return `gh: ${status.login}`;
+	if (status.actualLogin && status.expectedLogin) return "gh: wrong-account";
+	return "gh: auth-missing";
 }
 
 function commandMessage(status: GitHubBotStatus): string {
 	const lines = [statusText(status), `GH_CONFIG_DIR=${status.configDir}`];
-	if (status.expectedLogin) {
-		lines.push(`expected=${status.expectedLogin}`);
-	}
-	if (status.actualLogin && status.actualLogin !== status.login) {
-		lines.push(`actual=${status.actualLogin}`);
-	}
-	if (status.error) {
-		lines.push(`error=${status.error}`);
-	}
+	if (status.expectedLogin) lines.push(`expected=${status.expectedLogin}`);
+	if (status.actualLogin && status.actualLogin !== status.login) lines.push(`actual=${status.actualLogin}`);
+	if (status.error) lines.push(`error=${status.error}`);
 	if (!status.login) {
 		lines.push(
 			status.actualLogin && status.expectedLogin
@@ -177,23 +217,6 @@ function updateUiStatus(ctx: ExtensionContext, status: GitHubBotStatus): void {
 	ctx.ui.setStatus(STATUS_KEY, statusText(status));
 }
 
-function stripAnsi(text: string): string {
-	return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
-}
-
-function appendLimited(existing: string, next: string): string {
-	const combined = existing + next;
-	return combined.length > MAX_AUTH_OUTPUT_CHARS ? combined.slice(-MAX_AUTH_OUTPUT_CHARS) : combined;
-}
-
-export function extractDeviceCode(text: string): string | undefined {
-	return text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
-}
-
-export function extractDeviceUrl(text: string): string | undefined {
-	return text.match(/https:\/\/github\.com\/login\/device\S*/)?.[0];
-}
-
 function authWidgetLines(state: AuthDisplayState): string[] {
 	const lines = [
 		"GitHub bot auth in progress",
@@ -201,23 +224,9 @@ function authWidgetLines(state: AuthDisplayState): string[] {
 		"If GitHub shows your personal session, switch account or use incognito logged in as bot before entering code.",
 		"GH_CONFIG_DIR stores the CLI token; browser still chooses which GitHub account grants it.",
 	];
-
-	if (state.code) {
-		lines.push(`Code: ${state.code}`);
-	} else {
-		lines.push("Code: waiting for gh...");
-	}
-
-	if (state.url) {
-		lines.push(`URL: ${state.url}`);
-	} else {
-		lines.push("URL: waiting for gh...");
-	}
-
-	if (state.lastLines.length > 0) {
-		lines.push("", ...state.lastLines.slice(-4).map((line) => `gh: ${line}`));
-	}
-
+	lines.push(state.code ? `Code: ${state.code}` : "Code: waiting for gh...");
+	lines.push(state.url ? `URL: ${state.url}` : "URL: waiting for gh...");
+	if (state.lastLines.length > 0) lines.push("", ...state.lastLines.slice(-4).map((line) => `gh: ${line}`));
 	return lines;
 }
 
@@ -254,7 +263,6 @@ function notifyAuthOutput(
 	lineState.buffer += cleanChunk.replace(/\r/g, "\n");
 	const lines = lineState.buffer.split("\n");
 	lineState.buffer = lines.pop() ?? "";
-
 	for (const line of lines) {
 		const trimmed = line.trim();
 		if (trimmed) {
@@ -262,7 +270,6 @@ function notifyAuthOutput(
 			ctx.ui.notify(`gh auth: ${trimmed}`, "info");
 		}
 	}
-
 	updateAuthWidget(ctx, displayState);
 }
 
@@ -276,88 +283,53 @@ function flushAuthOutput(ctx: ExtensionContext, lineState: { buffer: string }, d
 	updateAuthWidget(ctx, displayState);
 }
 
-async function runWebAuth(ctx: ExtensionContext, configDir: string): Promise<AuthResult> {
+async function runWebAuth(ctx: ExtensionContext, configDir: string): Promise<ProcessResult> {
 	await mkdir(configDir, { recursive: true });
-
 	const displayState: AuthDisplayState = { lastLines: [] };
 	const seen: { code?: string; url?: string } = {};
+	const lineState = { buffer: "" };
 	updateAuthWidget(ctx, displayState);
 
-	const args = [
-		"auth",
-		"login",
-		"--hostname",
-		AUTH_HOSTNAME,
-		"--web",
-		"--clipboard",
-		"--git-protocol",
-		"https",
-		"--skip-ssh-key",
-	];
-
-	return new Promise<AuthResult>((resolveAuth, rejectAuth) => {
-		const child = spawn("gh", args, {
-			cwd: ctx.cwd,
-			env: getAuthEnvironment(configDir),
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-
-		let output = "";
-		let timedOut = false;
-		let killTimeout: NodeJS.Timeout | undefined;
-		const lineState = { buffer: "" };
-		const timeout = setTimeout(() => {
-			timedOut = true;
-			child.kill("SIGTERM");
-			killTimeout = setTimeout(() => child.kill("SIGKILL"), AUTH_KILL_GRACE_MS);
-		}, AUTH_TIMEOUT_MS);
-
-		child.once("error", (error) => {
-			clearTimeout(timeout);
-			if (killTimeout) {
-				clearTimeout(killTimeout);
-			}
-			rejectAuth(error);
-		});
-
-		const onOutput = (chunk: Buffer) => {
-			const text = chunk.toString("utf8");
-			output = appendLimited(output, text);
-			notifyAuthOutput(ctx, text, lineState, displayState, seen);
-		};
-
-		child.stdout?.on("data", onOutput);
-		child.stderr?.on("data", onOutput);
-
-		child.once("close", (code, signal) => {
-			clearTimeout(timeout);
-			if (killTimeout) {
-				clearTimeout(killTimeout);
-			}
-			flushAuthOutput(ctx, lineState, displayState);
-			applyGitHubBotEnvironment();
-			resolveAuth({ code, signal, output: stripAnsi(output).trim(), timedOut });
-		});
-
-		child.stdin?.write("\n");
-		child.stdin?.end();
+	const result = await runProcess({
+		command: "gh",
+		args: [
+			"auth",
+			"login",
+			"--hostname",
+			AUTH_HOSTNAME,
+			"--web",
+			"--clipboard",
+			"--git-protocol",
+			"https",
+			"--skip-ssh-key",
+		],
+		cwd: ctx.cwd,
+		env: getBotEnvironment(configDir, false),
+		timeoutMs: AUTH_TIMEOUT_MS,
+		input: "\n",
+		onOutput: (chunk) => notifyAuthOutput(ctx, chunk, lineState, displayState, seen),
 	});
+	flushAuthOutput(ctx, lineState, displayState);
+	return result;
 }
 
-function authFailureMessage(result: AuthResult): string {
-	if (result.timedOut) {
-		return "gh auth timed out before browser flow completed.";
-	}
-
-	const detail = result.output || `exit ${result.code ?? "unknown"}${result.signal ? ` (${result.signal})` : ""}`;
-	return `gh auth failed: ${detail}`;
+function authFailureMessage(result: ProcessResult): string {
+	if (result.timedOut) return "gh auth timed out before browser flow completed.";
+	return `gh auth failed: ${summarizeFailure(result)}`;
 }
 
-applyGitHubBotEnvironment();
+function formatGhBotResult(args: string[], status: GitHubBotStatus, result: ProcessResult): string {
+	const lines = [`gh_bot as ${status.login}`, `command: gh ${args.join(" ")}`, `exit=${result.code ?? "unknown"}`];
+	if (result.signal) lines.push(`signal=${result.signal}`);
+	if (result.timedOut) lines.push("timedOut=true");
+	if (result.stdout.trim()) lines.push("", "stdout:", result.stdout.trim());
+	if (result.stderr.trim()) lines.push("", "stderr:", result.stderr.trim());
+	return lines.join("\n");
+}
 
 export default function githubBotExtension(pi: ExtensionAPI): void {
 	async function refresh(ctx: ExtensionContext): Promise<GitHubBotStatus> {
-		const status = await readActiveLogin(pi, ctx.cwd);
+		const status = await readActiveLogin(ctx.cwd);
 		updateUiStatus(ctx, status);
 		return status;
 	}
@@ -372,21 +344,18 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 				"If browser is already signed in as you, switch account or use incognito before entering the code.",
 			].join("\n"),
 		);
-		if (!proceed) {
-			return refresh(ctx);
-		}
+		if (!proceed) return refresh(ctx);
 
-		const env = applyGitHubBotEnvironment();
+		const configDir = getConfiguredBotDir();
 		ctx.ui.notify(
 			`Starting GitHub browser auth for ${AUTH_HOSTNAME}. Use bot GitHub account. Code and URL will stay visible above editor.`,
 			"info",
 		);
 
-		let authResult: AuthResult;
+		let authResult: ProcessResult;
 		try {
-			authResult = await runWebAuth(ctx, env.configDir);
+			authResult = await runWebAuth(ctx, configDir);
 		} catch (error) {
-			applyGitHubBotEnvironment();
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`gh auth failed: ${message}`, "error");
 			return refresh(ctx);
@@ -406,9 +375,47 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const status = await refresh(ctx);
-		if (!status.login) {
-			ctx.ui.notify(commandMessage(status), "warning");
-		}
+		if (!status.login) ctx.ui.notify(commandMessage(status), "warning");
+	});
+
+	pi.registerTool({
+		name: "gh_bot",
+		label: "GitHub Bot",
+		description:
+			"Run GitHub CLI as the isolated bot identity. Use for GitHub issue/PR comments, review comments, replies, and other visible GitHub actions that should come from the bot account. Args are gh arguments without the leading 'gh'.",
+		promptSnippet: "Run GitHub CLI as the bot identity for issue/PR comments, review comments, and replies.",
+		promptGuidelines: [
+			"Use gh_bot instead of bash gh when creating GitHub issue comments, PR review comments, review replies, or other visible GitHub actions that should appear from the bot account.",
+			"Do not use gh_bot for local Git commands or authentication; use /gh-bot-auth when bot auth is missing.",
+		],
+		parameters: Type.Object({
+			args: Type.Array(Type.String(), { description: "Arguments to pass to gh, excluding the leading gh." }),
+			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to Pi cwd." })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const cwd = params.cwd ? resolve(ctx.cwd, params.cwd) : ctx.cwd;
+			const status = await readActiveLogin(cwd);
+			if (!status.login) throw new Error(commandMessage(status));
+
+			const result = await runGhBot(params.args, cwd);
+			const text = formatGhBotResult(params.args, status, result);
+			if (result.code !== 0) throw new Error(text);
+
+			return {
+				content: [{ type: "text", text }],
+				details: {
+					args: params.args,
+					cwd,
+					login: status.login,
+					configDir: status.configDir,
+					stdout: result.stdout,
+					stderr: result.stderr,
+					code: result.code,
+					signal: result.signal,
+					timedOut: result.timedOut,
+				},
+			};
+		},
 	});
 
 	pi.registerCommand("gh-bot-auth", {
@@ -428,11 +435,8 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 			}
 
 			const startAuth = await ctx.ui.confirm("GitHub bot auth missing", `${commandMessage(status)}\n\nStart browser auth now?`);
-			if (startAuth) {
-				await authenticate(ctx);
-			} else {
-				ctx.ui.notify(commandMessage(status), "warning");
-			}
+			if (startAuth) await authenticate(ctx);
+			else ctx.ui.notify(commandMessage(status), "warning");
 		},
 	});
 }

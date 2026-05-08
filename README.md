@@ -242,13 +242,25 @@ In npm package settings, configure GitHub Actions trusted publisher:
 - workflow file: `npm-publish.yml`
 - environment: `npm`
 
-Then tag a release:
+Publishing is version-driven. On every push to `main` (and on `v*` tags), the workflow checks `package.json`:
+
+- if `name@version` already exists on npm, it runs checks and skips publish
+- if `name@version` is not on npm, it runs checks and publishes that version
+
+Release by bumping `package.json` and pushing to `main`:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+npm version patch
+git push --follow-tags
 ```
 
-Workflow `.github/workflows/npm-publish.yml` runs `npm ci`, `npm run check`, then `npm publish --access public --provenance`.
+You can still push a tag manually if needed:
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+Workflow `.github/workflows/npm-publish.yml` runs `npm ci`, `npm run check`, then `npm publish --access public --provenance` only when the package version is unpublished.
 
 Pi package discovery uses the `pi-package` keyword and `pi.extensions` manifest in `package.json`.

@@ -50,6 +50,32 @@ gh api repos/OWNER/REPO/pulls/PR/comments -f body="..." ...
 
 Normal shell `gh` remains your existing identity unless you choose otherwise.
 
+## Automatic routing
+
+On install, the extension changes Pi behavior in three ways:
+
+1. **Tool guidance**: `gh_bot` advertises itself as the right tool for issue comments, PR comments, review comments, and review replies.
+2. **Per-turn prompt note**: every user turn gets a short routing rule: use `gh_bot` for visible GitHub dialogue; use normal tools for read-only lookups, local Git, commits, pushes, and ordinary coding.
+3. **Bash guard**: if the model tries common visible write commands through `bash`, the extension blocks the call and tells the model to retry with `gh_bot`.
+
+Guarded bash patterns include:
+
+```bash
+gh issue comment ...
+gh pr comment ...
+gh pr review ...
+gh api .../comments ...
+gh api .../reviews ...
+```
+
+This keeps synchronous coding ergonomic: commits, pushes, branch work, read-only `gh`, and shell usage stay as your normal identity. Bot identity is reserved for places where GitHub attribution helps readers distinguish bot dialogue from human dialogue.
+
+If you explicitly want to comment/review as yourself, either ask Pi to use normal `gh` as you or disable the guard:
+
+```bash
+PI_GH_BOT_AUTO_GUARD=0 pi
+```
+
 ## Commands
 
 ### `/gh-bot-status`

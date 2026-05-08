@@ -17,6 +17,7 @@ const ENV_KEYS = [
 	"GITHUB_ENTERPRISE_TOKEN",
 	"PI_GH_BOT_CONFIG_DIR",
 	"PI_GH_BOT_EXPECTED_LOGIN",
+	"PI_GH_BOT_AUTO_GUARD",
 	"PATH",
 ];
 
@@ -174,6 +175,50 @@ test(
 			rmSync(binDir, { recursive: true, force: true });
 			rmSync(configDir, { recursive: true, force: true });
 		}
+	}),
+);
+
+test(
+	"visible GitHub write classification targets comments and reviews",
+	restoreEnvAfter(() => {
+		assert.equal(extension.classifyVisibleGitHubWrite("gh issue comment 1 --body hi"), "GitHub issue comment");
+		assert.equal(extension.classifyVisibleGitHubWrite("gh pr comment 2 --body hi"), "GitHub PR comment");
+		assert.equal(extension.classifyVisibleGitHubWrite("gh pr review 2 --comment --body hi"), "GitHub PR review/comment");
+		assert.equal(
+			extension.classifyVisibleGitHubWrite("gh api repos/o/r/issues/1/comments -f body=hi"),
+			"GitHub API comment/review mutation",
+		);
+		assert.equal(extension.classifyVisibleGitHubWrite("gh pr view 2 --json title"), undefined);
+		assert.equal(extension.classifyVisibleGitHubWrite("git commit -m hi"), undefined);
+	}),
+);
+
+test(
+	"bash guard blocks visible gh comments and points to gh_bot",
+	restoreEnvAfter(async () => {
+		delete process.env.PI_GH_BOT_AUTO_GUARD;
+		const handlers = {};
+		extension.default({
+			on(name, handler) {
+				handlers[name] = handler;
+			},
+			registerTool() {},
+			registerCommand() {},
+		});
+
+		const result = await handlers.tool_call(
+			{ toolName: "bash", input: { command: "gh issue comment 1 --body hi" } },
+			{},
+		);
+		assert.equal(result.block, true);
+		assert.match(result.reason, /gh_bot/);
+
+		process.env.PI_GH_BOT_AUTO_GUARD = "0";
+		const disabled = await handlers.tool_call(
+			{ toolName: "bash", input: { command: "gh issue comment 1 --body hi" } },
+			{},
+		);
+		assert.equal(disabled, undefined);
 	}),
 );
 

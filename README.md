@@ -14,6 +14,8 @@ By default it does **not** force all Pi shell commands to use the bot. Your norm
   - default: `~/.config/gh-bot`
   - override: `PI_GH_BOT_CONFIG_DIR=/path/to/config`
 - Adds `gh_bot` tool for running `gh` with bot `GH_CONFIG_DIR`.
+- Adds automatic prompt guidance so Pi uses `gh_bot` for visible GitHub dialogue actions.
+- Adds a bash guard that blocks common `gh` comment/review commands and tells Pi to retry with `gh_bot`.
 - Removes token env vars from `gh_bot` calls so `GH_CONFIG_DIR` auth wins:
   - `GH_TOKEN`
   - `GITHUB_TOKEN`
@@ -119,7 +121,7 @@ Ask Pi to comment as bot, for example:
 Reply to PR comment 123456 as the bot: "Fixed in latest patch."
 ```
 
-The tool guidance tells Pi to use `gh_bot` for visible GitHub comments/replies.
+The extension injects tool guidance and a per-turn routing note so Pi uses `gh_bot` for visible GitHub comments/replies.
 
 ## Configuration
 
@@ -136,6 +138,14 @@ PI_GH_BOT_EXPECTED_LOGIN=my-bot pi
 ```
 
 When `PI_GH_BOT_EXPECTED_LOGIN` is set, `gh_bot` refuses mismatched browser auth and reports `gh: wrong-account`.
+
+Disable automatic bash guard:
+
+```bash
+PI_GH_BOT_AUTO_GUARD=0 pi
+```
+
+The guard only targets common visible GitHub write commands, such as `gh issue comment`, `gh pr comment`, `gh pr review`, and comment/review API calls. Normal read-only `gh`, shell commands, and Git commands are not blocked.
 
 ## Manual auth equivalent
 
@@ -163,10 +173,11 @@ env \
 
 - Normal terminal `gh` config is unchanged.
 - Normal Pi shell `gh` and `git` remain your existing identity.
-- Only the `gh_bot` tool uses bot `GH_CONFIG_DIR`.
+- Only the `gh_bot` tool and `/gh-bot-auth` use bot `GH_CONFIG_DIR`.
 - Bot auth missing becomes explicit `gh: auth-missing`.
 - Expected login mismatch becomes explicit `gh: wrong-account` and fails closed.
 - Repository access still depends on the bot account permissions. If the bot is not a collaborator/member, it cannot comment in private repos.
+- Set `PI_GH_BOT_AUTO_GUARD=0` if you intentionally want bash `gh` comments/reviews to use your personal identity.
 
 ## Development
 

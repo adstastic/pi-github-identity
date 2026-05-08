@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -9,6 +9,7 @@ const STATUS_KEY = "gh-bot";
 const AUTH_WIDGET_KEY = "gh-bot-auth";
 const DEFAULT_CONFIG_DIR = "~/.config/gh-bot";
 const EXPECTED_LOGIN_ENV_KEY = "PI_GH_BOT_EXPECTED_LOGIN";
+const AUTO_GUARD_ENV_KEY = "PI_GH_BOT_AUTO_GUARD";
 const AUTH_HOSTNAME = "github.com";
 const AUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
@@ -84,6 +85,22 @@ export function extractDeviceCode(text: string): string | undefined {
 
 export function extractDeviceUrl(text: string): string | undefined {
 	return text.match(/https:\/\/github\.com\/login\/device\S*/)?.[0];
+}
+
+function isAutoGuardEnabled(): boolean {
+	const value = process.env[AUTO_GUARD_ENV_KEY]?.trim().toLowerCase();
+	return !value || !["0", "false", "no", "off"].includes(value);
+}
+
+export function classifyVisibleGitHubWrite(command: string): string | undefined {
+	const normalized = command.replace(/\\\s*\n/g, " ").replace(/\s+/g, " ").trim();
+	if (/\bgh\s+issue\s+comment\b/.test(normalized)) return "GitHub issue comment";
+	if (/\bgh\s+pr\s+comment\b/.test(normalized)) return "GitHub PR comment";
+	if (/\bgh\s+pr\s+review\b/.test(normalized)) return "GitHub PR review/comment";
+	if (/\bgh\s+api\b/.test(normalized) && /(?:\/comments\b|\/reviews\b|addComment|addPullRequestReview|addPullRequestReviewComment|submitPullRequestReview|addPullRequestReviewThreadReply)/.test(normalized)) {
+		return "GitHub API comment/review mutation";
+	}
+	return undefined;
 }
 
 function loginMatchesExpected(actualLogin: string, expectedLogin: string): boolean {
@@ -318,6 +335,19 @@ function authFailureMessage(result: ProcessResult): string {
 	return `gh auth failed: ${summarizeFailure(result)}`;
 }
 
+function botRoutingPrompt(status: GitHubBotStatus): string {
+	const botStatus = status.login
+		? `Bot GitHub identity is available as ${status.login} through gh_bot.`
+		: `gh_bot is installed but bot auth is not ready (${statusText(status)}). Use /gh-bot-auth before bot-attributed GitHub writes.`;
+	return [
+		"GitHub bot identity routing:",
+		`- ${botStatus}`,
+		"- For visible GitHub dialogue actions (issue comments, PR comments, review comments, review replies), use gh_bot instead of bash gh so attribution is the bot account.",
+		"- For read-only GitHub lookups, local git commits, pushes, branches, and normal coding operations, use existing tools/identity unless the user explicitly asks for bot attribution.",
+		"- If the user explicitly asks to act as themselves/personally, do not use gh_bot.",
+	].join("\n");
+}
+
 function formatGhBotResult(args: string[], status: GitHubBotStatus, result: ProcessResult): string {
 	const lines = [`gh_bot as ${status.login}`, `command: gh ${args.join(" ")}`, `exit=${result.code ?? "unknown"}`];
 	if (result.signal) lines.push(`signal=${result.signal}`);
@@ -376,6 +406,23 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const status = await refresh(ctx);
 		if (!status.login) ctx.ui.notify(commandMessage(status), "warning");
+	});
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		const status = await refresh(ctx);
+		return { systemPrompt: `${event.systemPrompt}\n\n${botRoutingPrompt(status)}` };
+	});
+
+	pi.on("tool_call", (event) => {
+		if (!isAutoGuardEnabled() || !isToolCallEventType("bash", event)) return;
+		const command = event.input.command;
+		if (typeof command !== "string") return;
+		const visibleWrite = classifyVisibleGitHubWrite(command);
+		if (!visibleWrite) return;
+		return {
+			block: true,
+			reason: `${visibleWrite} should use gh_bot so GitHub attribution is the bot account. Retry with gh_bot args equal to the gh command arguments (omit the leading gh). Set PI_GH_BOT_AUTO_GUARD=0 to disable this guard.`,
+		};
 	});
 
 	pi.registerTool({

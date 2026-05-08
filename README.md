@@ -2,9 +2,11 @@
 
 Run selected GitHub CLI actions from Pi through a separate bot identity, without taking over your normal `gh` or Git workflow.
 
+A "bot identity" means a separate GitHub user account that you provision yourself, for example `my-name-bot`. This extension does not create a GitHub account, GitHub App, or installation token for you.
+
 ## Philosophy
 
-This package is for visible GitHub actions where attribution matters: issue comments, PR comments, review replies, bot-to-human dialogue, and future async workflows.
+This package is for visible GitHub actions where attribution matters: issue comments, PR comments, review replies, bot-to-human dialogue, and future async workflows. The bot is an ordinary GitHub account, so GitHub permissions work exactly like any other user: add it as a collaborator or org member where you want it to comment.
 
 By default it does **not** force all Pi shell commands to use the bot. Your normal `bash`/`gh`/`git` usage can stay as you. The extension adds an explicit `gh_bot` tool that the agent should use when a GitHub action should appear from the bot account.
 
@@ -76,6 +78,20 @@ If you explicitly want to comment/review as yourself, either ask Pi to use norma
 PI_GH_BOT_AUTO_GUARD=0 pi
 ```
 
+## Provision the bot account
+
+Before using the extension:
+
+1. Create/register a separate GitHub account for the bot.
+2. Add that account to repos/orgs where it should act:
+   - public repos may allow some actions without explicit access, depending on repo settings
+   - private repos require collaborator/org membership
+   - PR review comments require permission to the target repo
+3. Run `/gh-bot-auth` and authorize **that bot account** in the browser.
+4. Optional but recommended: set `PI_GH_BOT_EXPECTED_LOGIN=<bot-login>` so accidental personal-account auth fails closed.
+
+If the bot lacks repo access, `gh_bot` fails with GitHub's normal permission error. That is expected and safer than silently using your personal account.
+
 ## Commands
 
 ### `/gh-bot-status`
@@ -92,7 +108,7 @@ gh auth login --hostname github.com --web --clipboard --git-protocol https --ski
 
 Pi shows the one-time code and auth URL above the editor while `gh` waits for completion.
 
-> Important: `GH_CONFIG_DIR` controls where the CLI token is stored. The browser still decides which GitHub account authorizes that token. Use the bot GitHub account. If GitHub opens as your personal account, switch accounts or use an incognito/private window logged in as the bot before entering the code.
+> Important: `GH_CONFIG_DIR` controls where the CLI token is stored. The browser still decides which GitHub account authorizes that token. Use the separate bot GitHub account you provisioned. If GitHub opens as your personal account, switch accounts or use an incognito/private window logged in as the bot before entering the code.
 
 ## Install
 
@@ -202,6 +218,7 @@ env \
 - Only the `gh_bot` tool and `/gh-bot-auth` use bot `GH_CONFIG_DIR`.
 - Bot auth missing becomes explicit `gh: auth-missing`.
 - Expected login mismatch becomes explicit `gh: wrong-account` and fails closed.
+- You must provision the bot GitHub account yourself and grant it repo/org access where needed.
 - Repository access still depends on the bot account permissions. If the bot is not a collaborator/member, it cannot comment in private repos.
 - Set `PI_GH_BOT_AUTO_GUARD=0` if you intentionally want bash `gh` comments/reviews to use your personal identity.
 

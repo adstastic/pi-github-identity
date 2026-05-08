@@ -1,4 +1,4 @@
-# Pi GitHub Bot Extension
+# Pi GitHub Identity
 
 Run selected GitHub CLI actions from Pi through a separate bot identity, without taking over your normal `gh` or Git workflow.
 
@@ -99,26 +99,26 @@ Pi shows the one-time code and auth URL above the editor while `gh` waits for co
 From npm, after publish:
 
 ```bash
-pi install npm:pi-gh-bot-extension
+pi install npm:pi-github-identity
 ```
 
 From GitHub:
 
 ```bash
-pi install git:github.com/adstastic/pi-gh-bot-extension
+pi install git:github.com/adstastic/pi-github-identity
 ```
 
 From local checkout:
 
 ```bash
-pi install /Users/adi/code/pi-gh-bot-extension
+pi install /Users/adi/code/pi-github-identity
 ```
 
 Development symlink:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-ln -s /Users/adi/code/pi-gh-bot-extension/src/index.ts ~/.pi/agent/extensions/github-bot-gh.ts
+ln -s /Users/adi/code/pi-github-identity/src/index.ts ~/.pi/agent/extensions/github-identity.ts
 ```
 
 Restart Pi, or run:

@@ -1,4 +1,4 @@
-# Pi GitHub Bot Extension Plan
+# Pi GitHub Identity Plan
 
 ## Goal
 
@@ -7,7 +7,7 @@ Make Pi use a separate GitHub CLI identity for agent-driven GitHub actions, whil
 ## Package layout
 
 ```text
-pi-gh-bot-extension/
+pi-github-identity/
   package.json
   README.md
   PLAN.md
@@ -21,7 +21,7 @@ pi-gh-bot-extension/
 
 ```json
 {
-  "name": "pi-gh-bot-extension",
+  "name": "pi-github-identity",
   "type": "module",
   "pi": {
     "extensions": ["./src/index.ts"]
@@ -67,13 +67,13 @@ env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=~/.config/gh-bot gh api user --jq 
 Install extension into Pi, either as package:
 
 ```bash
-pi install git:file:///Users/adi/code/pi-gh-bot-extension
+pi install git:file:///Users/adi/code/pi-github-identity
 ```
 
 Or during development, symlink extension directly:
 
 ```bash
-ln -s /Users/adi/code/pi-gh-bot-extension/src/index.ts ~/.pi/agent/extensions/github-bot-gh.ts
+ln -s /Users/adi/code/pi-github-identity/src/index.ts ~/.pi/agent/extensions/github-identity.ts
 ```
 
 Then restart Pi or run:

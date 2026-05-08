@@ -1,17 +1,17 @@
 {
-  "name": "pi-gh-bot-extension",
+  "name": "pi-github-identity",
   "version": "0.1.0",
   "description": "Run selected GitHub CLI actions from Pi through a separate bot identity.",
   "type": "module",
   "license": "MIT",
   "author": "Adi",
-  "homepage": "https://github.com/adstastic/pi-gh-bot-extension#readme",
+  "homepage": "https://github.com/adstastic/pi-github-identity#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adstastic/pi-gh-bot-extension.git"
+    "url": "git+https://github.com/adstastic/pi-github-identity.git"
   },
   "bugs": {
-    "url": "https://github.com/adstastic/pi-gh-bot-extension/issues"
+    "url": "https://github.com/adstastic/pi-github-identity/issues"
   },
   "keywords": [
     "pi-package",

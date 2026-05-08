@@ -30,7 +30,8 @@
     "tsconfig.json"
   ],
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && npm test",
+    "test": "node --test tests/*.test.cjs",
     "pack:dry-run": "npm pack --dry-run"
   },
   "pi": {
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.74.0",
     "@types/node": "^24.10.1",
+    "jiti": "^2.6.1",
     "typescript": "^5.9.3"
   }
 }

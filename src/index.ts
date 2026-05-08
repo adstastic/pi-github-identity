@@ -5,18 +5,23 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 const STATUS_KEY = "gh-bot";
+const AUTH_WIDGET_KEY = "gh-bot-auth";
 const DEFAULT_CONFIG_DIR = "~/.config/gh-bot";
+const EXPECTED_LOGIN_ENV_KEY = "PI_GH_BOT_EXPECTED_LOGIN";
 const AUTH_HOSTNAME = "github.com";
 const AUTH_TIMEOUT_MS = 10 * 60 * 1000;
+const AUTH_KILL_GRACE_MS = 5_000;
 const MAX_AUTH_OUTPUT_CHARS = 8_000;
 const TOKEN_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] as const;
 
 type GitHubBotEnvironment = {
 	configDir: string;
+	expectedLogin?: string;
 };
 
 type GitHubBotStatus = GitHubBotEnvironment & {
 	login?: string;
+	actualLogin?: string;
 	error?: string;
 };
 
@@ -33,7 +38,7 @@ type AuthDisplayState = {
 	lastLines: string[];
 };
 
-function expandHome(path: string): string {
+export function expandHome(path: string): string {
 	if (path === "~") {
 		return homedir();
 	}
@@ -49,7 +54,12 @@ function getConfiguredBotDir(): string {
 	return expandHome(process.env.PI_GH_BOT_CONFIG_DIR?.trim() || DEFAULT_CONFIG_DIR);
 }
 
-function removeTokenEnvironment(env: NodeJS.ProcessEnv): void {
+function getExpectedLogin(): string | undefined {
+	const login = process.env[EXPECTED_LOGIN_ENV_KEY]?.trim();
+	return login || undefined;
+}
+
+export function removeTokenEnvironment(env: NodeJS.ProcessEnv): void {
 	for (const key of TOKEN_ENV_KEYS) {
 		delete env[key];
 	}
@@ -57,15 +67,22 @@ function removeTokenEnvironment(env: NodeJS.ProcessEnv): void {
 
 function applyGitHubBotEnvironment(): GitHubBotEnvironment {
 	const configDir = getConfiguredBotDir();
+	const expectedLogin = getExpectedLogin();
 
 	process.env.GH_CONFIG_DIR = configDir;
 	process.env.GH_PROMPT_DISABLED = "1";
 	removeTokenEnvironment(process.env);
 
-	return { configDir };
+	return { configDir, expectedLogin };
 }
 
-function getAuthEnvironment(configDir: string): NodeJS.ProcessEnv {
+function quarantineGitHubConfigDir(configDir: string): void {
+	process.env.GH_CONFIG_DIR = resolve(configDir, ".blocked-unexpected-login");
+	process.env.GH_PROMPT_DISABLED = "1";
+	removeTokenEnvironment(process.env);
+}
+
+export function getAuthEnvironment(configDir: string): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env, GH_CONFIG_DIR: configDir };
 	removeTokenEnvironment(env);
 	delete env.GH_PROMPT_DISABLED;
@@ -86,7 +103,11 @@ function summarizeGhFailure(result: ExecResult): string {
 	return `gh exited with code ${result.code}`;
 }
 
-async function readActiveLogin(pi: ExtensionAPI, cwd: string): Promise<GitHubBotStatus> {
+function loginMatchesExpected(actualLogin: string, expectedLogin: string): boolean {
+	return actualLogin.toLowerCase() === expectedLogin.toLowerCase();
+}
+
+export async function readActiveLogin(pi: ExtensionAPI, cwd: string): Promise<GitHubBotStatus> {
 	const env = applyGitHubBotEnvironment();
 
 	let result: ExecResult;
@@ -99,9 +120,18 @@ async function readActiveLogin(pi: ExtensionAPI, cwd: string): Promise<GitHubBot
 		};
 	}
 
-	const login = result.stdout.trim();
-	if (result.code === 0 && login) {
-		return { ...env, login };
+	const actualLogin = result.stdout.trim();
+	if (result.code === 0 && actualLogin) {
+		if (env.expectedLogin && !loginMatchesExpected(actualLogin, env.expectedLogin)) {
+			quarantineGitHubConfigDir(env.configDir);
+			return {
+				...env,
+				actualLogin,
+				error: `Authenticated as ${actualLogin}, expected ${env.expectedLogin}. Refusing to use this GitHub identity.`,
+			};
+		}
+
+		return { ...env, login: actualLogin, actualLogin };
 	}
 
 	return {
@@ -110,17 +140,35 @@ async function readActiveLogin(pi: ExtensionAPI, cwd: string): Promise<GitHubBot
 	};
 }
 
-function statusText(status: GitHubBotStatus): string {
-	return status.login ? `gh:${status.login}` : "gh:auth-missing";
+export function statusText(status: GitHubBotStatus): string {
+	if (status.login) {
+		return `gh:${status.login}`;
+	}
+
+	if (status.actualLogin && status.expectedLogin) {
+		return "gh:wrong-account";
+	}
+
+	return "gh:auth-missing";
 }
 
 function commandMessage(status: GitHubBotStatus): string {
 	const lines = [statusText(status), `GH_CONFIG_DIR=${status.configDir}`];
+	if (status.expectedLogin) {
+		lines.push(`expected=${status.expectedLogin}`);
+	}
+	if (status.actualLogin && status.actualLogin !== status.login) {
+		lines.push(`actual=${status.actualLogin}`);
+	}
 	if (status.error) {
 		lines.push(`error=${status.error}`);
 	}
 	if (!status.login) {
-		lines.push("Run /gh-bot-auth to start browser auth.");
+		lines.push(
+			status.actualLogin && status.expectedLogin
+				? "Run /gh-bot-auth after switching browser auth to expected bot account."
+				: "Run /gh-bot-auth to start browser auth.",
+		);
 	}
 	return lines.join("\n");
 }
@@ -138,11 +186,11 @@ function appendLimited(existing: string, next: string): string {
 	return combined.length > MAX_AUTH_OUTPUT_CHARS ? combined.slice(-MAX_AUTH_OUTPUT_CHARS) : combined;
 }
 
-function extractDeviceCode(text: string): string | undefined {
+export function extractDeviceCode(text: string): string | undefined {
 	return text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
 }
 
-function extractDeviceUrl(text: string): string | undefined {
+export function extractDeviceUrl(text: string): string | undefined {
 	return text.match(/https:\/\/github\.com\/login\/device\S*/)?.[0];
 }
 
@@ -174,7 +222,11 @@ function authWidgetLines(state: AuthDisplayState): string[] {
 }
 
 function updateAuthWidget(ctx: ExtensionContext, state: AuthDisplayState): void {
-	ctx.ui.setWidget("gh-bot-auth", authWidgetLines(state), { placement: "aboveEditor" });
+	ctx.ui.setWidget(AUTH_WIDGET_KEY, authWidgetLines(state), { placement: "aboveEditor" });
+}
+
+export function clearAuthWidget(ctx: Pick<ExtensionContext, "ui">): void {
+	ctx.ui.setWidget(AUTH_WIDGET_KEY, undefined);
 }
 
 function notifyAuthOutput(
@@ -252,14 +304,19 @@ async function runWebAuth(ctx: ExtensionContext, configDir: string): Promise<Aut
 
 		let output = "";
 		let timedOut = false;
+		let killTimeout: NodeJS.Timeout | undefined;
 		const lineState = { buffer: "" };
 		const timeout = setTimeout(() => {
 			timedOut = true;
 			child.kill("SIGTERM");
+			killTimeout = setTimeout(() => child.kill("SIGKILL"), AUTH_KILL_GRACE_MS);
 		}, AUTH_TIMEOUT_MS);
 
 		child.once("error", (error) => {
 			clearTimeout(timeout);
+			if (killTimeout) {
+				clearTimeout(killTimeout);
+			}
 			rejectAuth(error);
 		});
 
@@ -274,6 +331,9 @@ async function runWebAuth(ctx: ExtensionContext, configDir: string): Promise<Aut
 
 		child.once("close", (code, signal) => {
 			clearTimeout(timeout);
+			if (killTimeout) {
+				clearTimeout(killTimeout);
+			}
 			flushAuthOutput(ctx, lineState, displayState);
 			applyGitHubBotEnvironment();
 			resolveAuth({ code, signal, output: stripAnsi(output).trim(), timedOut });
@@ -293,18 +353,17 @@ function authFailureMessage(result: AuthResult): string {
 	return `gh auth failed: ${detail}`;
 }
 
-const initialEnvironment = applyGitHubBotEnvironment();
+applyGitHubBotEnvironment();
 
 export default function githubBotExtension(pi: ExtensionAPI): void {
-	let lastStatus: GitHubBotStatus = { ...initialEnvironment };
-
 	async function refresh(ctx: ExtensionContext): Promise<GitHubBotStatus> {
-		lastStatus = await readActiveLogin(pi, ctx.cwd);
-		updateUiStatus(ctx, lastStatus);
-		return lastStatus;
+		const status = await readActiveLogin(pi, ctx.cwd);
+		updateUiStatus(ctx, status);
+		return status;
 	}
 
 	async function authenticate(ctx: ExtensionContext): Promise<GitHubBotStatus> {
+		clearAuthWidget(ctx);
 		const proceed = await ctx.ui.confirm(
 			"GitHub bot auth",
 			[
@@ -331,6 +390,8 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`gh auth failed: ${message}`, "error");
 			return refresh(ctx);
+		} finally {
+			clearAuthWidget(ctx);
 		}
 
 		if (authResult.code !== 0) {
@@ -340,7 +401,6 @@ export default function githubBotExtension(pi: ExtensionAPI): void {
 
 		const status = await refresh(ctx);
 		ctx.ui.notify(commandMessage(status), status.login ? "info" : "warning");
-		ctx.ui.setWidget("gh-bot-auth", undefined);
 		return status;
 	}
 

@@ -8,6 +8,7 @@ On load, the extension:
 
 - Sets `GH_CONFIG_DIR` to `~/.config/gh-bot` by default.
 - Supports `PI_GH_BOT_CONFIG_DIR=/path/to/config` override.
+- Supports `PI_GH_BOT_EXPECTED_LOGIN=bot-login` fail-closed identity enforcement.
 - Sets `GH_PROMPT_DISABLED=1` for non-auth `gh` calls.
 - Removes token env vars that would bypass `GH_CONFIG_DIR`:
   - `GH_TOKEN`
@@ -16,8 +17,9 @@ On load, the extension:
   - `GITHUB_ENTERPRISE_TOKEN`
 - Checks the active bot account with `gh api user --jq .login`.
 - Shows Pi footer status:
-  - `gh:<login>` when authenticated
+  - `gh:<login>` when authenticated as the accepted account
   - `gh:auth-missing` when auth is missing
+  - `gh:wrong-account` when authenticated account does not match `PI_GH_BOT_EXPECTED_LOGIN`
 
 ## Commands
 
@@ -97,11 +99,21 @@ unset GH_CONFIG_DIR
 gh api user --jq .login
 ```
 
-## Custom bot config dir
+## Configuration
+
+Custom bot config dir:
 
 ```bash
 PI_GH_BOT_CONFIG_DIR=/path/to/gh-bot pi
 ```
+
+Expected bot login:
+
+```bash
+PI_GH_BOT_EXPECTED_LOGIN=my-bot pi
+```
+
+When `PI_GH_BOT_EXPECTED_LOGIN` is set, the extension refuses mismatched browser auth. It reports `gh:wrong-account` and points `GH_CONFIG_DIR` at a blocked empty config dir so Pi child `gh` commands cannot continue as the wrong account.
 
 ## Manual auth equivalent
 
@@ -130,12 +142,14 @@ env \
 - Normal terminal `gh` config is unchanged.
 - Pi process and Pi child tool calls inherit bot `GH_CONFIG_DIR`.
 - Bot auth missing becomes explicit `gh:auth-missing`; extension does not silently fall back to user `gh` config.
+- Expected login mismatch becomes explicit `gh:wrong-account` and is blocked closed.
 - Commands that explicitly set `GH_TOKEN=... gh ...` can still override this. Future guard can block or rewrite those commands.
 
 ## Development
 
 ```bash
 npm install
+npm test
 npm run check
 npm run pack:dry-run
 ```
